@@ -1,8 +1,9 @@
+
 import React, { useState, useRef, useEffect } from 'react';
 import { useStore } from '../store';
 import { BLOCKS, TEXTURES, ChatMessage } from '../types';
 import { getGeminiResponse } from '../services/geminiService';
-import { Bot, Send, Sparkles, Mic, Volume2 } from 'lucide-react';
+import { Bot, Send, Sparkles, Mic, Volume2, Wifi, WifiOff, AlertCircle } from 'lucide-react';
 
 export const UI: React.FC = () => {
   // Atomic selectors to prevent unnecessary re-renders
@@ -11,6 +12,7 @@ export const UI: React.FC = () => {
   const isTalking = useStore((state) => state.isTalking);
   const closestNpcId = useStore((state) => state.closestNpcId);
   const npcs = useStore((state) => state.npcs);
+  const voiceStatus = useStore((state) => state.voiceStatus);
 
   const [chatOpen, setChatOpen] = useState(false);
   const [prompt, setPrompt] = useState('');
@@ -59,6 +61,24 @@ export const UI: React.FC = () => {
     setLoading(false);
   };
 
+  const getVoiceStatusIcon = () => {
+      switch(voiceStatus) {
+          case 'connecting': return <Wifi className="w-5 h-5 animate-pulse text-yellow-300" />;
+          case 'connected': return <Volume2 className="w-5 h-5 text-green-300 animate-pulse" />;
+          case 'error': return <AlertCircle className="w-5 h-5 text-red-500" />;
+          default: return <WifiOff className="w-5 h-5 text-gray-400" />;
+      }
+  };
+
+  const getVoiceStatusText = () => {
+    switch(voiceStatus) {
+        case 'connecting': return 'CONNECTING...';
+        case 'connected': return 'LISTENING';
+        case 'error': return 'ERROR';
+        default: return 'OFFLINE';
+    }
+};
+
   return (
     <div className="absolute inset-0 pointer-events-none select-none z-50 overflow-hidden">
       {/* Crosshair */}
@@ -69,10 +89,18 @@ export const UI: React.FC = () => {
 
       {/* Voice Chat Indicator */}
       {isTalking && activeNpc && (
-        <div className="absolute top-20 left-1/2 transform -translate-x-1/2 bg-red-600/80 text-white px-6 py-2 rounded-full flex items-center gap-3 backdrop-blur border border-red-400 animate-pulse">
-            <Mic className="w-5 h-5" />
-            <span className="font-bold pixel-font text-xs">ON AIR: {activeNpc.name}</span>
-            <Volume2 className="w-5 h-5" />
+        <div className={`absolute top-20 left-1/2 transform -translate-x-1/2 px-6 py-2 rounded-full flex items-center gap-3 backdrop-blur border shadow-lg transition-colors duration-300
+            ${voiceStatus === 'connected' ? 'bg-green-900/80 border-green-400' : 
+              voiceStatus === 'error' ? 'bg-red-900/80 border-red-400' : 
+              'bg-yellow-900/80 border-yellow-400'}`}>
+            <Mic className="w-5 h-5 text-white" />
+            <div className="flex flex-col">
+                 <span className="font-bold pixel-font text-[10px] text-white/70 tracking-widest uppercase">VOICE CHAT</span>
+                 <span className="font-bold pixel-font text-xs text-white flex items-center gap-2">
+                    {activeNpc.name.toUpperCase()}: {getVoiceStatusText()}
+                 </span>
+            </div>
+            {getVoiceStatusIcon()}
         </div>
       )}
 
@@ -96,14 +124,13 @@ export const UI: React.FC = () => {
       </div>
 
       {/* Instructions */}
-      <div className="absolute top-4 left-4 text-white text-sm font-bold drop-shadow-md bg-black/40 p-3 rounded pixel-font leading-6">
+      <div className="absolute top-4 left-4 text-white text-sm font-bold drop-shadow-md bg-black/40 p-3 rounded pixel-font leading-6 pointer-events-none">
         <p>WASD to Move</p>
         <p>SPACE to Jump</p>
-        <p>L-Click: Remove Block</p>
-        <p>R-Click: Place Block</p>
-        <p>1-8: Select Block</p>
+        <p>L-Click: Remove</p>
+        <p>R-Click: Place</p>
+        <p>V: Toggle Voice (Press Once)</p>
         <p>T: Text Chat</p>
-        <p>V: Voice Chat (Near NPC)</p>
       </div>
 
       {/* AI Chat Interface */}

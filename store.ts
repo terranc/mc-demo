@@ -8,12 +8,14 @@ interface GameState {
   selectedBlock: BlockType;
   closestNpcId: string | null;
   isTalking: boolean;
+  voiceStatus: 'disconnected' | 'connecting' | 'connected' | 'error';
   npcChatText: string;
   addBlock: (x: number, y: number, z: number) => void;
   removeBlock: (x: number, y: number, z: number) => void;
   setBlockType: (type: BlockType) => void;
   setClosestNpcId: (id: string | null) => void;
   setIsTalking: (isTalking: boolean) => void;
+  setVoiceStatus: (status: 'disconnected' | 'connecting' | 'connected' | 'error') => void;
   setNpcChatText: (text: string) => void;
   updateNpcPosition: (id: string, pos: [number, number, number]) => void;
   resetWorld: () => void;
@@ -53,16 +55,15 @@ const generateInitialWorld = () => {
 
   // Spawn exactly 2 NPCs at safe locations
   for (let i = 0; i < 2; i++) {
-     let x = Math.floor((Math.random() * size * 2) - size);
-     let z = Math.floor((Math.random() * size * 2) - size);
-     // Find ground height at this x,z
-     // (Approximation based on generation logic above)
-     let y = Math.floor(Math.sin(x / 4) * Math.cos(z / 4) * 2);
+     let x = Math.floor((Math.random() * size * 1.5) - size * 0.75);
+     let z = Math.floor((Math.random() * size * 1.5) - size * 0.75);
+     // Find safe ground height
+     const y = Math.floor(Math.sin(x / 4) * Math.cos(z / 4) * 2);
      
      const npcData = NPC_NAMES[i % NPC_NAMES.length];
      npcs.push({
         id: nanoid(),
-        position: [x, y, z], // Spawn on top of grass
+        position: [x, y + 2, z], // Drop them from slightly higher to ensure they don't clip
         name: npcData.name,
         personality: npcData.personality,
         color: npcData.color
@@ -80,6 +81,7 @@ export const useStore = create<GameState>((set) => ({
   selectedBlock: 'dirt',
   closestNpcId: null,
   isTalking: false,
+  voiceStatus: 'disconnected',
   npcChatText: '',
   addBlock: (x, y, z) => set((state) => {
     const exists = state.blocks.some(b => 
@@ -105,7 +107,12 @@ export const useStore = create<GameState>((set) => ({
   })),
   setBlockType: (type) => set({ selectedBlock: type }),
   setClosestNpcId: (id) => set({ closestNpcId: id }),
-  setIsTalking: (talking) => set({ isTalking: talking, npcChatText: talking ? '' : '' }),
+  setIsTalking: (talking) => set({ 
+    isTalking: talking, 
+    npcChatText: talking ? '' : '', 
+    voiceStatus: talking ? 'connecting' : 'disconnected' 
+  }),
+  setVoiceStatus: (status) => set({ voiceStatus: status }),
   setNpcChatText: (text) => set({ npcChatText: text }),
   updateNpcPosition: (id, pos) => set((state) => ({
     npcs: state.npcs.map(npc => npc.id === id ? { ...npc, position: pos } : npc)

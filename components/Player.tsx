@@ -5,11 +5,16 @@ import { PointerLockControls } from '@react-three/drei';
 import { useStore } from '../store';
 import * as THREE from 'three';
 
-const JUMP_FORCE = 0.16; // Slightly higher for better feel
+const JUMP_FORCE = 0.18;
 const SPEED = 0.12;
-const GRAVITY = 0.006; // Slightly stronger gravity
-const PLAYER_RADIUS = 0.3; 
+const GRAVITY = 0.008;
+const PLAYER_RADIUS = 0.3;
 const PLAYER_HEIGHT = 1.8;
+const EYE_HEIGHT = 1.5;
+
+// Distance thresholds
+const NPC_ACTIVATE_DIST = 3.5;
+const NPC_DEACTIVATE_DIST = 6.0;
 
 export const Player: React.FC = () => {
   const { camera, scene } = useThree();
@@ -29,6 +34,7 @@ export const Player: React.FC = () => {
   const moveRight = useRef(false);
   const canJump = useRef(false);
   const velocity = useRef(new THREE.Vector3());
+  const lastToggleTime = useRef(0);
   
   const raycaster = useRef(new THREE.Raycaster());
 
@@ -43,35 +49,33 @@ export const Player: React.FC = () => {
   useEffect(() => {
     const handleMouseDown = (e: MouseEvent) => {
       if (!document.pointerLockElement) return;
+      if (isTalking) return;
 
       raycaster.current.setFromCamera(new THREE.Vector2(0, 0), camera);
       
       const intersects = raycaster.current.intersectObjects(scene.children, true);
-      const validIntersects = intersects.filter(i => i.distance < 8 && i.object.type !== 'GridHelper');
+      const validIntersects = intersects.filter(i => i.distance < 6 && i.object.type !== 'GridHelper');
 
       if (validIntersects.length > 0) {
         const intersect = validIntersects[0];
+        if (intersect.object.userData?.isNPC) return;
         if (!intersect.face) return;
 
         if (e.button === 0) {
-          // Left Click: Remove
           const targetX = Math.floor(intersect.point.x - intersect.face.normal.x * 0.5);
           const targetY = Math.floor(intersect.point.y - intersect.face.normal.y * 0.5);
           const targetZ = Math.floor(intersect.point.z - intersect.face.normal.z * 0.5);
           removeBlock(targetX, targetY, targetZ);
         } else if (e.button === 2) {
-          // Right Click: Add
           const targetX = Math.floor(intersect.point.x + intersect.face.normal.x * 0.5);
           const targetY = Math.floor(intersect.point.y + intersect.face.normal.y * 0.5);
           const targetZ = Math.floor(intersect.point.z + intersect.face.normal.z * 0.5);
           
-          // Simple distance check to prevent placing inside self
-          // (The physics loop handles collision, but this prevents getting stuck immediately)
           const dx = Math.abs(targetX - camera.position.x);
-          const dy = Math.abs(targetY - (camera.position.y - 1)); // Approximate center
+          const dy = Math.abs(targetY - (camera.position.y - 1)); 
           const dz = Math.abs(targetZ - camera.position.z);
           
-          if (dx < 0.8 && dy < 1.0 && dz < 0.8) return;
+          if (dx < 0.6 && dy < 1.0 && dz < 0.6) return;
 
           addBlock(targetX, targetY, targetZ);
         }
@@ -80,19 +84,15 @@ export const Player: React.FC = () => {
 
     window.addEventListener('mousedown', handleMouseDown);
     return () => window.removeEventListener('mousedown', handleMouseDown);
-  }, [addBlock, removeBlock, camera, scene]);
+  }, [camera, scene, addBlock, removeBlock, isTalking]);
 
-  // Keyboard Controls
+  // Keyboard Movement Controls
   useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      switch (event.code) {
-        case 'ArrowUp':
+    const handleKeyDown = (e: KeyboardEvent) => {
+      switch (e.code) {
         case 'KeyW': moveForward.current = true; break;
-        case 'ArrowLeft':
-        case 'KeyA': moveLeft.current = true; break;
-        case 'ArrowDown':
         case 'KeyS': moveBackward.current = true; break;
-        case 'ArrowRight':
+        case 'KeyA': moveLeft.current = true; break;
         case 'KeyD': moveRight.current = true; break;
         case 'Space': 
           if (canJump.current) {
@@ -101,72 +101,65 @@ export const Player: React.FC = () => {
           }
           break;
         case 'KeyV':
-            if (closestNpcId && !isTalking) {
-               setIsTalking(true);
-            } else if (isTalking) {
-               setIsTalking(false);
-            }
-            break;
+        case 'KeyB': 
+           if (e.repeat) return; 
+           if (closestNpcId) {
+             const now = Date.now();
+             // Debounce logic: prevent toggling more than once every 500ms
+             if (now - lastToggleTime.current > 500) {
+                 lastToggleTime.current = now;
+                 setIsTalking(!isTalking);
+             }
+           }
+           break;
       }
     };
-    const onKeyUp = (event: KeyboardEvent) => {
-      switch (event.code) {
-        case 'ArrowUp':
+
+    const handleKeyUp = (e: KeyboardEvent) => {
+      switch (e.code) {
         case 'KeyW': moveForward.current = false; break;
-        case 'ArrowLeft':
-        case 'KeyA': moveLeft.current = false; break;
-        case 'ArrowDown':
         case 'KeyS': moveBackward.current = false; break;
-        case 'ArrowRight':
+        case 'KeyA': moveLeft.current = false; break;
         case 'KeyD': moveRight.current = false; break;
       }
     };
-    document.addEventListener('keydown', onKeyDown);
-    document.addEventListener('keyup', onKeyUp);
+
+    document.addEventListener('keydown', handleKeyDown);
+    document.addEventListener('keyup', handleKeyUp);
     return () => {
-      document.removeEventListener('keydown', onKeyDown);
-      document.removeEventListener('keyup', onKeyUp);
+      document.removeEventListener('keydown', handleKeyDown);
+      document.removeEventListener('keyup', handleKeyUp);
     };
   }, [closestNpcId, isTalking, setIsTalking]);
 
-  // Collision Helper
+  // Check collision at a specific position
   const checkCollision = (pos: THREE.Vector3) => {
-    const r = PLAYER_RADIUS;
-    // Player AABB (Axis-Aligned Bounding Box) relative to Camera Position
-    // Camera is at eye level (approx 1.6m from feet)
-    const pMinX = pos.x - r;
-    const pMaxX = pos.x + r;
-    const pMinY = pos.y - 1.6; // Feet
-    const pMaxY = pos.y + 0.2; // Top of head
-    const pMinZ = pos.z - r;
-    const pMaxZ = pos.z + r;
-
-    // Scan integer coordinates around the player
-    const minX = Math.floor(pMinX - 0.5);
-    const maxX = Math.ceil(pMaxX + 0.5);
-    const minY = Math.floor(pMinY - 0.5);
-    const maxY = Math.ceil(pMaxY + 0.5);
-    const minZ = Math.floor(pMinZ - 0.5);
-    const maxZ = Math.ceil(pMaxZ + 0.5);
+    const r = PLAYER_RADIUS; 
+    const feetY = pos.y - EYE_HEIGHT;
+    
+    // Check local bounds
+    const minX = Math.floor(pos.x - r); const maxX = Math.ceil(pos.x + r);
+    const minY = Math.floor(feetY);     const maxY = Math.ceil(feetY + PLAYER_HEIGHT);
+    const minZ = Math.floor(pos.z - r); const maxZ = Math.ceil(pos.z + r);
 
     for (let x = minX; x <= maxX; x++) {
       for (let y = minY; y <= maxY; y++) {
         for (let z = minZ; z <= maxZ; z++) {
           if (blockMap.has(`${x},${y},${z}`)) {
-            // Block AABB
-            const bMinX = x - 0.5;
-            const bMaxX = x + 0.5;
-            const bMinY = y - 0.5;
-            const bMaxY = y + 0.5;
-            const bMinZ = z - 0.5;
-            const bMaxZ = z + 0.5;
+             // AABB vs AABB
+             const pMinX = pos.x - r; const pMaxX = pos.x + r;
+             const pMinY = feetY;     const pMaxY = feetY + PLAYER_HEIGHT;
+             const pMinZ = pos.z - r; const pMaxZ = pos.z + r;
+             
+             const bMinX = x - 0.5; const bMaxX = x + 0.5;
+             const bMinY = y - 0.5; const bMaxY = y + 0.5;
+             const bMinZ = z - 0.5; const bMaxZ = z + 0.5;
 
-            // Check overlap
-            if (pMinX < bMaxX && pMaxX > bMinX &&
-                pMinY < bMaxY && pMaxY > bMinY &&
-                pMinZ < bMaxZ && pMaxZ > bMinZ) {
-              return true;
-            }
+             if (pMinX < bMaxX && pMaxX > bMinX &&
+                 pMinY < bMaxY && pMaxY > bMinY &&
+                 pMinZ < bMaxZ && pMaxZ > bMinZ) {
+               return true;
+             }
           }
         }
       }
@@ -174,39 +167,20 @@ export const Player: React.FC = () => {
     return false;
   };
 
-  // Physics Loop
+  // Main Physics Loop
   useFrame(() => {
-    // 1. NPC Detection
-    let foundNpc = null;
-    let minDist = 3; // Interaction radius
+    if (isTalking) return; 
 
-    for (const npc of npcs) {
-        const npcPos = new THREE.Vector3(...npc.position);
-        const dist = camera.position.distanceTo(npcPos);
-        if (dist < minDist) {
-            minDist = dist;
-            foundNpc = npc.id;
-        }
-    }
-    
-    // Only update state if it changed to prevent loop trash
-    if (foundNpc !== closestNpcId) {
-        setClosestNpcId(foundNpc);
-        if (foundNpc === null && isTalking) {
-            setIsTalking(false); // Walked away
-        }
-    }
-
-    // 2. Calculate Movement Vector
+    // 1. Calculate Horizontal Movement
     const direction = new THREE.Vector3();
     const frontVector = new THREE.Vector3(
-      0,
-      0,
+      0, 
+      0, 
       Number(moveBackward.current) - Number(moveForward.current)
     );
     const sideVector = new THREE.Vector3(
-      Number(moveLeft.current) - Number(moveRight.current),
-      0,
+      Number(moveLeft.current) - Number(moveRight.current), 
+      0, 
       0
     );
 
@@ -216,45 +190,100 @@ export const Player: React.FC = () => {
       .multiplyScalar(SPEED)
       .applyEuler(camera.rotation);
 
-    // 3. X Movement & Collision
-    const oldX = camera.position.x;
-    camera.position.x += direction.x;
+    velocity.current.x = direction.x;
+    velocity.current.z = direction.z;
+
+    // 2. Apply XZ Movement (Wall Sliding)
+    const oldPos = camera.position.clone();
+    
+    // Try X
+    camera.position.x += velocity.current.x;
     if (checkCollision(camera.position)) {
-      camera.position.x = oldX;
+        camera.position.x = oldPos.x;
     }
 
-    // 4. Z Movement & Collision
-    const oldZ = camera.position.z;
-    camera.position.z += direction.z;
+    // Try Z
+    camera.position.z += velocity.current.z;
     if (checkCollision(camera.position)) {
-      camera.position.z = oldZ;
+        camera.position.z = oldPos.z;
     }
 
-    // 5. Y Movement (Gravity) & Collision
-    camera.position.y += velocity.current.y;
+    // 3. Apply Y Movement (Gravity)
     velocity.current.y -= GRAVITY;
+    
+    camera.position.y += velocity.current.y;
 
     if (checkCollision(camera.position)) {
-      // Revert Y to previous valid state
-      // (This is a simplified approach; ideally we'd snap to surface)
-      camera.position.y -= velocity.current.y;
-      
-      if (velocity.current.y < 0) {
-        // Landing
-        velocity.current.y = 0;
-        canJump.current = true;
-      } else {
-        // Hitting head
-        velocity.current.y = 0;
-      }
+       // We hit something vertically
+       
+       if (velocity.current.y < 0) {
+           // Falling down -> Hit ground
+           canJump.current = true;
+           velocity.current.y = 0;
+           
+           // Snap to surface
+           const feetY = camera.position.y - EYE_HEIGHT;
+           const blockCenterY = Math.floor(feetY + 0.5); 
+           const surfaceY = blockCenterY + 0.5;
+           
+           camera.position.y = surfaceY + EYE_HEIGHT;
+
+       } else {
+           // Jumping up -> Hit ceiling
+           velocity.current.y = 0;
+           camera.position.y = oldPos.y; // Simply revert to avoid getting stuck
+       }
     }
 
-    // Void Respawn
+    // Void reset
     if (camera.position.y < -30) {
         camera.position.set(0, 10, 0);
-        velocity.current.set(0,0,0);
+        velocity.current.set(0, 0, 0);
+    }
+
+    // --- NPC Proximity Logic with Hysteresis ---
+    let nearestId: string | null = null;
+    let minDst = Infinity;
+
+    for (const npc of npcs) {
+        const npcPos = new THREE.Vector3(npc.position[0], npc.position[1], npc.position[2]);
+        const dist = npcPos.distanceTo(camera.position);
+        if (dist < minDst) {
+            minDst = dist;
+            nearestId = npc.id;
+        }
+    }
+
+    let newClosestId = closestNpcId;
+
+    if (nearestId) {
+        if (nearestId === closestNpcId) {
+             // Currently selected: Keep it until we are far away (Hysteresis Exit)
+             if (minDst > NPC_DEACTIVATE_DIST) {
+                 newClosestId = null;
+             }
+        } else {
+             // Not selected: Select only if very close (Hysteresis Entry)
+             if (minDst < NPC_ACTIVATE_DIST) {
+                 newClosestId = nearestId;
+             } else if (!closestNpcId && minDst < NPC_ACTIVATE_DIST + 1) {
+                 // Slight ease-in if nothing is selected
+                 newClosestId = nearestId;
+             }
+        }
+    } else {
+        newClosestId = null;
+    }
+
+    if (newClosestId !== closestNpcId) {
+        setClosestNpcId(newClosestId);
     }
   });
 
-  return <PointerLockControls />;
+  return (
+    <PointerLockControls 
+      onLock={() => console.log('locked')} 
+      onUnlock={() => console.log('unlocked')} 
+    />
+  );
 };

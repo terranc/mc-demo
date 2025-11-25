@@ -1,8 +1,9 @@
+
 import React, { useEffect, useRef } from 'react';
 import { useStore } from '../store';
 import { GoogleGenAI, LiveServerMessage, Modality } from '@google/genai';
 
-// --- Helper Functions from Guidelines ---
+// --- Helper Functions ---
 
 function encode(bytes: Uint8Array) {
   let binary = '';
@@ -59,185 +60,208 @@ async function decodeAudioData(
 export const VoiceChat: React.FC = () => {
   const isTalking = useStore((state) => state.isTalking);
   const closestNpcId = useStore((state) => state.closestNpcId);
-  const npcs = useStore((state) => state.npcs);
   const setIsTalking = useStore((state) => state.setIsTalking);
   const setNpcChatText = useStore((state) => state.setNpcChatText);
+  const setVoiceStatus = useStore((state) => state.setVoiceStatus);
 
-  const mounted = useRef(false);
-  const inputContext = useRef<AudioContext | null>(null);
-  const outputContext = useRef<AudioContext | null>(null);
-  const nextStartTime = useRef<number>(0);
-  const sources = useRef<Set<AudioBufferSourceNode>>(new Set());
-  const processorRef = useRef<ScriptProcessorNode | null>(null);
+  // Refs for audio resources to allow cleanup
+  const audioContextsRef = useRef<{ input: AudioContext | null; output: AudioContext | null }>({ input: null, output: null });
   const streamRef = useRef<MediaStream | null>(null);
-
-  // Helper to ensure audio is ready
-  const ensureAudioContext = async () => {
-    if (outputContext.current?.state === 'suspended') {
-        try {
-            await outputContext.current.resume();
-        } catch (e) {
-            console.warn("Could not resume audio context (user interaction needed first)");
-        }
-    }
-  };
+  const processorRef = useRef<ScriptProcessorNode | null>(null);
+  const sourcesRef = useRef<Set<AudioBufferSourceNode>>(new Set());
+  const nextStartTimeRef = useRef<number>(0);
+  const currentTranscriptionRef = useRef('');
 
   useEffect(() => {
-    mounted.current = true;
+    // Local flag to track if this specific effect run has been cancelled/cleaned up
+    let isCancelled = false;
+    let currentSession: any = null;
 
     if (!isTalking || !closestNpcId) {
       setNpcChatText('');
-      return () => { mounted.current = false; };
+      setVoiceStatus('disconnected');
+      return;
     }
 
-    const currentNpc = npcs.find((n) => n.id === closestNpcId);
-    if (!currentNpc) return () => { mounted.current = false; };
-
-    let sessionPromise: Promise<any> | null = null;
-    let currentTranscription = '';
+    const currentNpc = useStore.getState().npcs.find((n) => n.id === closestNpcId);
+    if (!currentNpc) {
+        setIsTalking(false);
+        return;
+    }
 
     const startSession = async () => {
       try {
+        setVoiceStatus('connecting');
+        currentTranscriptionRef.current = '';
+        nextStartTimeRef.current = 0;
+
         const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
         const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
-        inputContext.current = new AudioContextClass({ sampleRate: 16000 });
-        outputContext.current = new AudioContextClass({ sampleRate: 24000 });
+        const inputCtx = new AudioContextClass({ sampleRate: 16000 });
+        const outputCtx = new AudioContextClass({ sampleRate: 24000 });
+        
+        audioContextsRef.current = { input: inputCtx, output: outputCtx };
 
-        await ensureAudioContext();
+        if (isCancelled) return; // Exit if cleaned up during context creation
 
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        // Resume contexts if suspended
+        if (outputCtx.state === 'suspended') await outputCtx.resume();
+        if (inputCtx.state === 'suspended') await inputCtx.resume();
+
+        const stream = await navigator.mediaDevices.getUserMedia({ 
+            audio: {
+                echoCancellation: true,
+                noiseSuppression: true,
+                autoGainControl: true
+            } 
+        });
+        
+        if (isCancelled) {
+            stream.getTracks().forEach(t => t.stop());
+            return;
+        }
         streamRef.current = stream;
 
-        sessionPromise = ai.live.connect({
+        // Establish connection
+        // We use the promise to send input, but we also store the session for closing
+        const sessionPromise = ai.live.connect({
           model: 'gemini-2.5-flash-native-audio-preview-09-2025',
           callbacks: {
             onopen: () => {
-              if (!mounted.current || !inputContext.current) return;
+              if (isCancelled || !audioContextsRef.current.input) return;
               console.log('Voice Session Opened');
+              setVoiceStatus('connected');
 
-              const source = inputContext.current.createMediaStreamSource(stream);
-              const processor = inputContext.current.createScriptProcessor(4096, 1, 1);
+              const source = inputCtx.createMediaStreamSource(stream);
+              const processor = inputCtx.createScriptProcessor(4096, 1, 1);
               processorRef.current = processor;
 
               processor.onaudioprocess = (e) => {
-                if (!mounted.current || !sessionPromise) return;
-                
+                if (isCancelled) return;
                 const inputData = e.inputBuffer.getChannelData(0);
                 const pcmBlob = createBlob(inputData);
-
+                
+                // Use the resolved sessionPromise to ensure we send to the correct session
                 sessionPromise.then((session) => {
-                  if (mounted.current) {
-                    session.sendRealtimeInput({ media: pcmBlob });
-                  }
+                    if (!isCancelled) session.sendRealtimeInput({ media: pcmBlob });
                 });
               };
 
               source.connect(processor);
-              processor.connect(inputContext.current.destination);
+              processor.connect(inputCtx.destination);
             },
             onmessage: async (message: LiveServerMessage) => {
-              if (!mounted.current || !outputContext.current) return;
+              if (isCancelled || !audioContextsRef.current.output) return;
 
-              // Handle Transcription (Speech Bubble)
               if (message.serverContent?.outputTranscription?.text) {
-                  currentTranscription += message.serverContent.outputTranscription.text;
-                  setNpcChatText(currentTranscription);
-              }
-              
-              if (message.serverContent?.turnComplete) {
-                  // Keep text for a bit, then clear could be handled elsewhere, 
-                  // but for now we keep the last sentence until new one starts.
-                   currentTranscription = '';
+                  currentTranscriptionRef.current += message.serverContent.outputTranscription.text;
+                  setNpcChatText(currentTranscriptionRef.current);
               }
 
-              // Handle Audio Output
-              const base64EncodedAudioString = message.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
-              if (base64EncodedAudioString) {
-                const ctx = outputContext.current;
-                nextStartTime.current = Math.max(nextStartTime.current, ctx.currentTime);
+              const base64Audio = message.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
+              if (base64Audio) {
+                const ctx = audioContextsRef.current.output;
+                nextStartTimeRef.current = Math.max(nextStartTimeRef.current, ctx.currentTime);
                 
-                const audioBuffer = await decodeAudioData(
-                  decode(base64EncodedAudioString),
-                  ctx,
-                  24000,
-                  1
-                );
+                const audioBuffer = await decodeAudioData(decode(base64Audio), ctx, 24000, 1);
+                
+                if (isCancelled) return;
 
                 const source = ctx.createBufferSource();
                 source.buffer = audioBuffer;
                 source.connect(ctx.destination);
-                
-                source.addEventListener('ended', () => {
-                   sources.current.delete(source);
-                });
-
-                source.start(nextStartTime.current);
-                nextStartTime.current += audioBuffer.duration;
-                sources.current.add(source);
+                source.onended = () => sourcesRef.current.delete(source);
+                source.start(nextStartTimeRef.current);
+                nextStartTimeRef.current += audioBuffer.duration;
+                sourcesRef.current.add(source);
               }
 
-              const interrupted = message.serverContent?.interrupted;
-              if (interrupted) {
-                sources.current.forEach((source) => {
-                  source.stop();
-                  sources.current.delete(source);
-                });
-                nextStartTime.current = 0;
-                currentTranscription = '';
+              if (message.serverContent?.interrupted) {
+                sourcesRef.current.forEach((s) => s.stop());
+                sourcesRef.current.clear();
+                nextStartTimeRef.current = 0;
+                currentTranscriptionRef.current = '';
                 setNpcChatText('');
               }
             },
             onclose: (e) => {
-              console.log('Voice Session Closed', e);
-              if (mounted.current) setIsTalking(false);
+               if (!isCancelled) {
+                   console.log('Session closed remotely');
+                   setVoiceStatus('disconnected');
+                   setIsTalking(false);
+               }
             },
             onerror: (e) => {
-              console.error('Voice Session Error', e);
-              if (mounted.current) setIsTalking(false);
-            },
+               console.error('Session error', e);
+               if (!isCancelled) {
+                   setVoiceStatus('error');
+                   // Delay disconnect slightly to show error
+                   setTimeout(() => setIsTalking(false), 2000);
+               }
+            }
           },
           config: {
             responseModalities: [Modality.AUDIO],
             speechConfig: {
               voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Puck' } },
             },
-            outputAudioTranscription: {}, // Request text transcription of model audio
-            systemInstruction: `You are ${currentNpc.name}. ${currentNpc.personality}. Keep responses extremely short (max 1 sentence), conversational and reactive.`,
+            outputAudioTranscription: {}, 
+            systemInstruction: `You are ${currentNpc.name}. ${currentNpc.personality}. Keep responses extremely short (max 1-2 sentences). Be conversational and witty.`,
           },
         });
+
+        const session = await sessionPromise;
+        if (isCancelled) {
+            session.close();
+            return;
+        }
+        currentSession = session;
+
       } catch (err) {
-        console.error("Failed to start voice session:", err);
-        setIsTalking(false);
+        console.error("Failed to initialize voice chat:", err);
+        if (!isCancelled) {
+            setVoiceStatus('error');
+            setTimeout(() => setIsTalking(false), 1500);
+        }
       }
     };
 
     startSession();
 
+    // Cleanup function
     return () => {
-      mounted.current = false;
+      isCancelled = true;
       
+      if (currentSession) {
+          try {
+            currentSession.close();
+          } catch(e) { console.warn("Error closing session", e); }
+      }
+
       if (processorRef.current) {
         processorRef.current.disconnect();
         processorRef.current = null;
       }
+
       if (streamRef.current) {
-        streamRef.current.getTracks().forEach(track => track.stop());
+        streamRef.current.getTracks().forEach(t => t.stop());
         streamRef.current = null;
       }
-      if (inputContext.current) {
-        inputContext.current.close();
-        inputContext.current = null;
+
+      sourcesRef.current.forEach(s => s.stop());
+      sourcesRef.current.clear();
+
+      if (audioContextsRef.current.input) {
+          audioContextsRef.current.input.close();
+          audioContextsRef.current.input = null;
       }
-      if (outputContext.current) {
-        outputContext.current.close();
-        outputContext.current = null;
+      if (audioContextsRef.current.output) {
+          audioContextsRef.current.output.close();
+          audioContextsRef.current.output = null;
       }
-      sources.current.forEach(s => s.stop());
-      sources.current.clear();
-      nextStartTime.current = 0;
     };
-  }, [isTalking, closestNpcId, npcs, setIsTalking, setNpcChatText]);
+  }, [isTalking, closestNpcId, setIsTalking, setNpcChatText, setVoiceStatus]);
 
   return null;
 };
