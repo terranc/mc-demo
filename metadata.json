@@ -1,0 +1,7 @@
+{
+  "name": "Voxel Verse AI",
+  "description": "A 3D Voxel sandbox game with an integrated Gemini AI survival guide. Build, explore, and ask the AI for crafting tips or creative ideas.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
